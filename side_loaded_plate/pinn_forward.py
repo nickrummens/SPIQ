@@ -34,41 +34,50 @@ def boundary_left(x, on_boundary):
 
 
 def boundary_right(x, on_boundary):
-    return on_boundary and dde.utils.isclose(x[0], 1.0)
-
-
-def boundary_top(x, on_boundary):
-    return on_boundary and dde.utils.isclose(x[1], 1.0)
+    return on_boundary and dde.utils.isclose(x[0], x_max)
 
 
 def boundary_bottom(x, on_boundary):
     return on_boundary and dde.utils.isclose(x[1], 0.0)
 
 # Soft Boundary Conditions
-ux_top_bc = dde.icbc.DirichletBC(geom, lambda x: 0, boundary_top, component=0)
-ux_bottom_bc = dde.icbc.DirichletBC(geom, lambda x: 0, boundary_bottom, component=0)
-uy_left_bc = dde.icbc.DirichletBC(geom, lambda x: 0, boundary_left, component=1)
+ux_left_bc = dde.icbc.DirichletBC(geom, lambda x: 0, boundary_left, component=0)
 uy_bottom_bc = dde.icbc.DirichletBC(geom, lambda x: 0, boundary_bottom, component=1)
-uy_right_bc = dde.icbc.DirichletBC(geom, lambda x: 0, boundary_right, component=1)
-sxx_left_bc = dde.icbc.DirichletBC(geom, lambda x: 0, boundary_left, component=2)
-sxx_right_bc = dde.icbc.DirichletBC(geom, lambda x: 0, boundary_right, component=2)
-syy_top_bc = dde.icbc.DirichletBC(
-    geom,
-    lambda x: (2 * mu + lmbd) * Q * np.sin(np.pi * x[:, 0:1]),
-    boundary_top,
-    component=3,
-)
+sxx_right_bc = dde.icbc.DirichletBC(geom, lambda x: side_load(x[:, 1]), boundary_right, component=2)
 
 
 # Hard Boundary Conditions
 def hard_BC(x, f, x_max=3.0):
-    Ux = f[:, 0] * x[:, 0] * x[:, 1]  
-    Uy = f[:, 1] * x[:, 0] * x[:, 1] 
+    Ux = f[:, 0] * x[:, 0] 
+    Uy = f[:, 1] * x[:, 0]
 
     Sxx = f[:, 2] * (x_max - x[:, 0]) + side_load(x[:, 1])
     Syy = f[:, 3] 
     Sxy = f[:, 4]
     return stack((Ux, Uy, Sxx, Syy, Sxy), axis=1)
+
+
+# Load FEM reference solution
+from scipy.interpolate import RegularGridInterpolator
+data = np.loadtxt("fem_solution_200_points.dat")
+X_val = data[:, :2]
+u_val = data[:, 2:4]
+stress_val = data[:, 7:10]
+
+solution_val = np.hstack((u_val, stress_val))
+
+n_mesh_points = int(np.sqrt(X_val.shape[0]))
+
+# Interpolate solution
+x_grid = np.linspace(0, 3, n_mesh_points)
+y_grid = np.linspace(0, 3, n_mesh_points)
+
+interpolators = []
+for i in range(solution_val.shape[1]):
+    interp = RegularGridInterpolator((x_grid, y_grid), solution_val[:, i].reshape(n_mesh_points, n_mesh_points).T)
+    interpolators.append(interp)
+
+solution_fn = lambda x, y: np.array([interp((x, y)) for interp in interpolators]).T
 
 
 def jacobian(f, x, i, j):
@@ -109,14 +118,9 @@ if BC_type == "hard":
     bcs = []
 else:
     bcs = [
-        ux_top_bc,
-        ux_bottom_bc,
-        uy_left_bc,
-        uy_bottom_bc,
-        uy_right_bc,
-        sxx_left_bc,
         sxx_right_bc,
-        syy_top_bc,
+        uy_bottom_bc,
+        ux_left_bc,
     ]
 
 data = dde.data.PDE(
@@ -126,6 +130,7 @@ data = dde.data.PDE(
     num_domain=500,
     num_boundary=500,
     num_test=100,
+    solution=solution_fn,
 )
 
 layers = [2, [40] * 5, [40] * 5, [40] * 5, [40] * 5, 5]
@@ -136,7 +141,7 @@ if BC_type == "hard":
     net.apply_output_transform(hard_BC)
 
 model = dde.Model(data, net)
-model.compile("adam", lr=0.001)
+model.compile("adam", lr=0.001
 losshistory, train_state = model.train(iterations=5000)
 
 dde.saveplot(losshistory, train_state, issave=True, isplot=True)
