@@ -11,6 +11,7 @@ import time
 import os
 from scipy.interpolate import RegularGridInterpolator
 import argparse
+import jax
 
 parser = argparse.ArgumentParser(description='Physics Informed Neural Networks for Linear Elastic Plate')
 
@@ -25,8 +26,7 @@ parser.add_argument('--n_DIC', type=int, default=6, help='Number of DIC')
 parser.add_argument('--noise_ratio', type=float, default=0, help='Noise ratio')
 parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
 parser.add_argument('--u_0', type=float, default=1, help='Displacement scaling factor')
-parser.add_argument('--loss_weights', nargs='+', type=float, default=[1,1,1,1,1,1e6,1e6], help='Loss weights (more on DIC points)')
-parser.add_argument('--is_forward', action='store_true', help='Inverse problem')
+parser.add_argument('--loss_weights', nargs='+', type=float, default=[1,1,1,1,1], help='Loss weights (more on DIC points)')
 
 args = parser.parse_args()
 
@@ -42,7 +42,6 @@ noise_ratio = args.noise_ratio
 lr = args.lr
 u_0 = args.u_0
 loss_weights = args.loss_weights
-is_forward = args.is_forward
 
 if net_type == "spinn":
     dde.config.set_default_autodiff("forward")
@@ -51,11 +50,6 @@ x_max = 1.0
 y_max = 4.0
 E = 210e3  # Young's modulus
 nu = 0.3  # Poisson's ratio
-
-if not is_forward:
-    E = dde.Variable(E*0.9)
-    nu = dde.Variable(nu*1.1)
-    trainable_variables = [E, nu]
 
 lmbd = E * nu / ((1 + nu) * (1 - 2 * nu))  # Lame's first parameter
 mu = E / (2 * (1 + nu))  # Lame's second parameter
@@ -107,26 +101,25 @@ def HardBC(x, f):
 
 
 # Load geometry mapping
+nx=25
+ny=75
 dir_path = os.path.dirname(os.path.realpath(__file__))
-Xp = np.loadtxt(os.path.join(dir_path, r"geometry/deep_notched_mapping.dat"))
+Xp = np.loadtxt(os.path.join(dir_path, f"../geometry/deep_notched_{nx}x{ny}.txt"))
 
-n_mesh_points = int(np.sqrt(Xp.shape[0]))
 
-# Interpolate solution
-x_grid = np.linspace(0, x_max, n_mesh_points)
-y_grid = np.linspace(0, y_max, n_mesh_points)
-
-interpolators = []
-for i in range(Xp.shape[1]):
-    interp = RegularGridInterpolator((x_grid, y_grid), Xp[:, i].reshape(n_mesh_points, n_mesh_points).T)
-    interpolators.append(interp)
+# Interpolate mapping
+X_map_points = Xp[:, 0].reshape((ny, nx)).T
+Y_map_points = Xp[:, 1].reshape((ny, nx)).T
 
 def geometry_mapping(x):
-    if net_type == "spinn":
-        x_mesh = [x_.reshape(-1) for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
-        x = stack(x_mesh, axis=-1)
+    x_pos = x[:, 0]/x_max*(nx-1)
+    y_pos = x[:, 1]/y_max*(ny-1)
 
-    return np.array([interp((x[:,0], x[:,1])) for interp in interpolators]).T
+    x_mapped = jax.scipy.ndimage.map_coordinates(X_map_points, [x_pos, y_pos], order=1)
+    y_mapped = jax.scipy.ndimage.map_coordinates(Y_map_points, [x_pos, y_pos], order=1)
+
+    return stack((x_mapped, y_mapped), axis=1)
+
 
 
 def jacobian(f, x, i, j):
@@ -144,8 +137,6 @@ def pde(x, f):
         x_mesh = [x_.reshape(-1) for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
         x = stack(x_mesh, axis=-1)
     x = geometry_mapping(x)
-    # f[0][:, 0:2] = f[0][:, 0:2] * u_0
-    # f[1][0:2] = f[1][0:2] * u_0
 
     E_xx = jacobian(f, x, i=0, j=0) 
     E_yy = jacobian(f, x, i=1, j=1)
@@ -228,8 +219,8 @@ if net_type == "spinn":
     num_point = 100
     total_points = num_point**2 + num_boundary**2
     num_params = get_num_params(net, input_shape=layers[0])
-    x_plot = np.linspace(0,x_max,int(x_max/h_plot))
-    y_plot = np.linspace(0,y_max,int(y_max/h_plot))
+    x_plot = np.linspace(0,x_max,100)
+    y_plot = np.linspace(0,y_max,100)
     X_plot = np.stack((x_plot, y_plot), axis=1)
 
 else:
@@ -245,7 +236,7 @@ else:
     )
     X_plot = np.stack((X_mesh[0].ravel(), X_mesh[1].ravel()), axis=1)
 
-num_test = 10000
+num_test = 100
 
 data = dde.data.PDE(
     geom,
@@ -262,7 +253,7 @@ if bc_type == "hard":
     net.apply_output_transform(HardBC)
 
 
-results_path = [r"./forward",r"/mnt/d/phd/SPIQ/loaded_plate/forward"][1]
+results_path = [r"./forward",r"/mnt/d/phd/SPIQ/deep_notched/forward"][1]
 folder_name = f"{net_type}_{available_time if available_time else n_iter}{'min' if available_time else 'iter'}"
 
 # Check if any folders with the same name exist
@@ -285,23 +276,16 @@ if not os.path.exists(new_folder_path):
 
 callbacks = [dde.callbacks.Timer(available_time)] if available_time else []
 
-if not is_forward:
-    callbacks.append(dde.callbacks.VariableValue([E, nu], period=log_every, filename=os.path.join(new_folder_path, "variables_history.dat")))
-
 for i, field in log_output_fields.items():
     callbacks.append(dde.callbacks.OperatorPredictor(X_plot, lambda x, output, i=i: output[0][:, i], period=log_every, filename=os.path.join(new_folder_path, f"{field}_history.dat")))
 
 model = dde.Model(data, net)
-model.compile(optimizer, lr=lr, metrics=["l2 relative error"], loss_weights=loss_weights, external_trainable_variables=trainable_variables if not is_forward else None)
+model.compile(optimizer, lr=lr, loss_weights=loss_weights)
 
 start_time = time.time()
-trained_variables = model.external_trainable_variables
-print(f"E: {trained_variables[0]:.3f}, nu: {trained_variables[1]:.3f}")
 losshistory, train_state = model.train(
     iterations=n_iter, callbacks=callbacks, display_every=log_every
 )
-trainable_variables = model.external_trainable_variables
-print(f"E: {trainable_variables[0]:.3f}, nu: {trainable_variables[1]:.3f}")
 elapsed = time.time() - start_time
 
 
