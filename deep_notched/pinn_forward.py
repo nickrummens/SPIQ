@@ -12,12 +12,13 @@ import os
 from scipy.interpolate import RegularGridInterpolator
 import argparse
 import jax
+import jax.numpy as jnp
 
 parser = argparse.ArgumentParser(description='Physics Informed Neural Networks for Linear Elastic Plate')
 
-parser.add_argument('--n_iter', type=int, default=2000000, help='Number of iterations')
-parser.add_argument('--log_every', type=int, default=100, help='Log every n steps')
-parser.add_argument('--available_time', type=int, default=2, help='Available time in minutes')
+parser.add_argument('--n_iter', type=int, default=10000000, help='Number of iterations')
+parser.add_argument('--log_every', type=int, default=500, help='Log every n steps')
+parser.add_argument('--available_time', type=int, default=10, help='Available time in minutes')
 parser.add_argument('--log_output_fields', nargs='+', default=['Ux', 'Uy', 'Sxx', 'Syy', 'Sxy'], help='Fields to log')
 parser.add_argument('--net_type', choices=['spinn', 'pfnn'], default='spinn', help='Type of network')
 parser.add_argument('--bc_type', choices=['hard', 'soft'], default='hard', help='Type of boundary condition')
@@ -25,8 +26,8 @@ parser.add_argument('--mlp', choices=['mlp', 'modified_mlp'], default='mlp', hel
 parser.add_argument('--n_DIC', type=int, default=6, help='Number of DIC')
 parser.add_argument('--noise_ratio', type=float, default=0, help='Noise ratio')
 parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
-parser.add_argument('--u_0', type=float, default=1, help='Displacement scaling factor')
-parser.add_argument('--loss_weights', nargs='+', type=float, default=[1,1,1,1,1], help='Loss weights (more on DIC points)')
+parser.add_argument('--u_0', type=float, default=1e-4, help='Displacement scaling factor')
+parser.add_argument('--loss_weights', nargs='+', type=float, default=[1,1,1,1,1,1], help='Loss weights (more on DIC points)')
 
 args = parser.parse_args()
 
@@ -62,8 +63,30 @@ sin = dde.backend.sin
 cos = dde.backend.cos
 stack = dde.backend.stack
 
-if dde.backend.backend_name == "jax":
-    import jax.numpy as jnp
+
+# Load geometry mapping
+nx=25
+ny=75
+dir_path = os.path.dirname(os.path.realpath(__file__))
+Xp = np.loadtxt(os.path.join(dir_path, f"../geometry/deep_notched_{nx}x{ny}.txt"))
+
+
+# Interpolate mapping
+X_map_points = Xp[:, 0].reshape((ny, nx)).T
+Y_map_points = Xp[:, 1].reshape((ny, nx)).T
+
+def coordMap(x, padding=1e-6):
+    x_pos = x[0]/x_max*(nx-1)*(1-2*padding) + padding
+    y_pos = x[1]/y_max*(ny-1)*(1-2*padding) + padding
+
+    x_mapped = jax.scipy.ndimage.map_coordinates(X_map_points, [x_pos, y_pos], order=1, mode='nearest')
+    y_mapped = jax.scipy.ndimage.map_coordinates(Y_map_points, [x_pos, y_pos], order=1, mode='nearest')
+
+    return jnp.stack((x_mapped, y_mapped), axis=0)
+
+def tensMap(tens, x):
+    J = jax.jacobian(coordMap)(x)
+    return J @ tens
 
 geom = dde.geometry.Rectangle([0, 0], [x_max, y_max])
 
@@ -94,31 +117,22 @@ def HardBC(x, f):
     Ux = f[:, 0] * x[:, 1]*(y_max - x[:, 1])*u_0 
     Uy = f[:, 1] * x[:, 1]*u_0
 
+    U_mapped = jax.vmap(tensMap)(stack((Ux, Uy), axis=1), x)
+
+
     Sxx = f[:, 2] * (x_max - x[:, 0])*x[:, 0]
-    Syy = f[:, 3] * (y_max - x[:, 1]) + pstress
+    Syy = f[:, 3] #* (y_max - x[:, 1]) + pstress
     Sxy = f[:, 4] * x[:, 0]*(x_max - x[:, 0])
-    return stack((Ux, Uy, Sxx, Syy, Sxy), axis=1)
 
+    S = jnp.stack((Sxx, Sxy, Sxy, Syy), axis=1).reshape(-1, 2, 2)
+    S_mapped = jax.vmap(tensMap)(S, x)
 
-# Load geometry mapping
-nx=25
-ny=75
-dir_path = os.path.dirname(os.path.realpath(__file__))
-Xp = np.loadtxt(os.path.join(dir_path, f"../geometry/deep_notched_{nx}x{ny}.txt"))
+    Syy_mapped = S_mapped[:,1,1] * (y_max - x[:, 1]) + pstress
 
+    S_mapped = jnp.stack((S_mapped[:,0,0],Syy_mapped,(S_mapped[:,0,1]+S_mapped[:,1,0])/2), axis=1)
+    return jnp.concatenate((U_mapped, S_mapped), axis=1)
+    # return stack((Ux, Uy, Sxx, Syy, Sxy), axis=1)
 
-# Interpolate mapping
-X_map_points = Xp[:, 0].reshape((ny, nx)).T
-Y_map_points = Xp[:, 1].reshape((ny, nx)).T
-
-def geometry_mapping(x):
-    x_pos = x[:, 0]/x_max*(nx-1)
-    y_pos = x[:, 1]/y_max*(ny-1)
-
-    x_mapped = jax.scipy.ndimage.map_coordinates(X_map_points, [x_pos, y_pos], order=1)
-    y_mapped = jax.scipy.ndimage.map_coordinates(Y_map_points, [x_pos, y_pos], order=1)
-
-    return stack((x_mapped, y_mapped), axis=1)
 
 
 
@@ -136,7 +150,7 @@ def pde(x, f):
     if net_type == "spinn":
         x_mesh = [x_.reshape(-1) for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
         x = stack(x_mesh, axis=-1)
-    x = geometry_mapping(x)
+    x = jax.vmap(coordMap)(x)
 
     E_xx = jacobian(f, x, i=0, j=0) 
     E_yy = jacobian(f, x, i=1, j=1)
@@ -177,7 +191,20 @@ def pde(x, f):
 # measure_Ux = dde.PointSetBC(X_DIC_input, U_DIC[:, 0:1], component=0)
 # measure_Uy = dde.PointSetBC(X_DIC_input, U_DIC[:, 1:2], component=1)
 
-bcs = []
+# Integral stress BC
+n_integral = 100
+x_integral = np.linspace(0, x_max, n_integral)
+y_integral = np.concatenate((np.linspace(0, y_max*0.4, 50), np.linspace(y_max*0.6, y_max, 50)))
+integral_points = np.stack((x_integral, y_integral), axis=1)
+
+def integral_stress(inputs, outputs, X):
+    x_inputs = jnp.meshgrid(inputs[:, 0], inputs[:, 1], indexing="ij")[0]
+    Syy = outputs[:, 3:4].reshape(x_inputs.shape)
+    return jnp.trapezoid(Syy, x_inputs, axis=0)
+
+Integral_BC = dde.PointSetOperatorBC(integral_points, pstress*x_max, integral_stress)
+
+bcs = [Integral_BC]
 num_boundary = 0
 
 # if n_DIC:
@@ -205,7 +232,7 @@ def get_num_params(net, input_shape=None):
 
         rng = jax.random.PRNGKey(0)
         return sum(
-            p.size for p in jax.tree_leaves(net.init(rng, jnp.ones(input_shape)))
+            p.size for p in jax.tree.leaves(net.init(rng, jnp.ones(input_shape)))
         )
 
 
