@@ -17,8 +17,8 @@ import jax.numpy as jnp
 parser = argparse.ArgumentParser(description='Physics Informed Neural Networks for Linear Elastic Plate')
 
 parser.add_argument('--n_iter', type=int, default=10000000, help='Number of iterations')
-parser.add_argument('--log_every', type=int, default=500, help='Log every n steps')
-parser.add_argument('--available_time', type=int, default=10, help='Available time in minutes')
+parser.add_argument('--log_every', type=int, default=1000, help='Log every n steps')
+parser.add_argument('--available_time', type=int, default=20, help='Available time in minutes')
 parser.add_argument('--log_output_fields', nargs='+', default=['Ux', 'Uy', 'Sxx', 'Syy', 'Sxy'], help='Fields to log')
 parser.add_argument('--net_type', choices=['spinn', 'pfnn'], default='spinn', help='Type of network')
 parser.add_argument('--bc_type', choices=['hard', 'soft'], default='hard', help='Type of boundary condition')
@@ -27,7 +27,7 @@ parser.add_argument('--n_DIC', type=int, default=6, help='Number of DIC')
 parser.add_argument('--noise_ratio', type=float, default=0, help='Noise ratio')
 parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
 parser.add_argument('--u_0', type=float, default=1e-4, help='Displacement scaling factor')
-parser.add_argument('--loss_weights', nargs='+', type=float, default=[1,1,1,1,1,1], help='Loss weights (more on DIC points)')
+parser.add_argument('--loss_weights', nargs='+', type=float, default=[1,1,1,1,1,1e2], help='Loss weights (more on DIC points)')
 
 args = parser.parse_args()
 
@@ -192,9 +192,9 @@ def pde(x, f):
 # measure_Uy = dde.PointSetBC(X_DIC_input, U_DIC[:, 1:2], component=1)
 
 # Integral stress BC
-n_integral = 100
+n_integral = 10
 x_integral = np.linspace(0, x_max, n_integral)
-y_integral = np.concatenate((np.linspace(0, y_max*0.4, 50), np.linspace(y_max*0.6, y_max, 50)))
+y_integral = np.concatenate((np.linspace(0, y_max*0.4, int(n_integral/2)), np.linspace(y_max*0.6, y_max, int(n_integral/2))))
 integral_points = np.stack((x_integral, y_integral), axis=1)
 
 def integral_stress(inputs, outputs, X):
