@@ -16,9 +16,9 @@ import jax.numpy as jnp
 
 parser = argparse.ArgumentParser(description='Physics Informed Neural Networks for Linear Elastic Plate')
 
-parser.add_argument('--n_iter', type=int, default=10000000, help='Number of iterations')
-parser.add_argument('--log_every', type=int, default=1000, help='Log every n steps')
-parser.add_argument('--available_time', type=int, default=20, help='Available time in minutes')
+parser.add_argument('--n_iter', type=int, default=10, help='Number of iterations')
+parser.add_argument('--log_every', type=int, default=2500, help='Log every n steps')
+parser.add_argument('--available_time', type=int, default=60, help='Available time in minutes')
 parser.add_argument('--log_output_fields', nargs='+', default=['Ux', 'Uy', 'Sxx', 'Syy', 'Sxy'], help='Fields to log')
 parser.add_argument('--net_type', choices=['spinn', 'pfnn'], default='spinn', help='Type of network')
 parser.add_argument('--bc_type', choices=['hard', 'soft'], default='hard', help='Type of boundary condition')
@@ -26,8 +26,9 @@ parser.add_argument('--mlp', choices=['mlp', 'modified_mlp'], default='mlp', hel
 parser.add_argument('--n_DIC', type=int, default=6, help='Number of DIC')
 parser.add_argument('--noise_ratio', type=float, default=0, help='Noise ratio')
 parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
-parser.add_argument('--u_0', type=float, default=1e-4, help='Displacement scaling factor')
-parser.add_argument('--loss_weights', nargs='+', type=float, default=[1,1,1,1,1,1e2], help='Loss weights (more on DIC points)')
+parser.add_argument('--u_0', type=float, default=1e-5, help='Displacement scaling factor')
+parser.add_argument('--loss_weights', nargs='+', type=float, default=[1,1,1e2,1e2,1e2,1], help='Loss weights (more on DIC points)')
+parser.add_argument('--save_model', action='store_true', help='Save model')
 
 args = parser.parse_args()
 
@@ -43,6 +44,7 @@ noise_ratio = args.noise_ratio
 lr = args.lr
 u_0 = args.u_0
 loss_weights = args.loss_weights
+save_model = args.save_model
 
 if net_type == "spinn":
     dde.config.set_default_autodiff("forward")
@@ -62,6 +64,8 @@ pstress = 1.0
 sin = dde.backend.sin
 cos = dde.backend.cos
 stack = dde.backend.stack
+
+
 
 
 # Load geometry mapping
@@ -88,26 +92,34 @@ def tensMap(tens, x):
     J = jax.jacobian(coordMap)(x)
     return J @ tens
 
+# Load solution
+n_mesh_x = 50
+n_mesh_y = 200
+
+dir_path = os.path.dirname(os.path.realpath(__file__))
+data = np.loadtxt(os.path.join(dir_path, f"fem_solution_{n_mesh_x}x{n_mesh_y}.dat"))
+X_val = data[:, :2]
+u_val = data[:, 2:4]
+stress_val = data[:, 7:10]
+
+solution_val = np.hstack((u_val, stress_val))
+
+# Interpolate solution
+x_grid = np.linspace(0, x_max, n_mesh_x)
+y_grid = np.linspace(0, y_max, n_mesh_y)
+
+interpolators = []
+for i in range(solution_val.shape[1]):
+    interp = RegularGridInterpolator((x_grid, y_grid), solution_val[:, i].reshape(n_mesh_y, n_mesh_x).T)
+    interpolators.append(interp)
+
+def solution_fn(x):
+    x_mesh = [x_.reshape(-1) for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
+    x = stack(x_mesh, axis=-1)
+    # x = jax.vmap(coordMap)(x)
+    return np.array([interp((x[:,0], x[:,1])) for interp in interpolators]).T
+
 geom = dde.geometry.Rectangle([0, 0], [x_max, y_max])
-
-
-def boundary_left(x, on_boundary):
-    return on_boundary and dde.utils.isclose(x[0], 0.0)
-
-
-def boundary_right(x, on_boundary):
-    return on_boundary and dde.utils.isclose(x[0], y_max)
-
-
-def boundary_bottom(x, on_boundary):
-    return on_boundary and dde.utils.isclose(x[1], 0.0)
-
-# Soft Boundary Conditions
-ux_left_bc = dde.icbc.DirichletBC(geom, lambda x: 0, boundary_left, component=0)
-uy_bottom_bc = dde.icbc.DirichletBC(geom, lambda x: 0, boundary_bottom, component=1)
-sxx_right_bc = dde.icbc.DirichletBC(geom, lambda x: pstress, boundary_right, component=2)
-
-
 
 def HardBC(x, f):
     if net_type == "spinn" and x.shape[0] != f.shape[0]:
@@ -134,13 +146,9 @@ def HardBC(x, f):
     # return stack((Ux, Uy, Sxx, Syy, Sxy), axis=1)
 
 
-
-
 def jacobian(f, x, i, j):
     if dde.backend.backend_name == "jax":
-        return dde.grad.jacobian(f, x, i=i, j=j)[
-            0
-        ]  # second element is the function used by jax to compute the gradients
+        return dde.grad.jacobian(f, x, i=i, j=j)[0]  
     else:
         return dde.grad.jacobian(f, x, i=i, j=j)
 
@@ -192,15 +200,19 @@ def pde(x, f):
 # measure_Uy = dde.PointSetBC(X_DIC_input, U_DIC[:, 1:2], component=1)
 
 # Integral stress BC
-n_integral = 10
+n_integral = 100
 x_integral = np.linspace(0, x_max, n_integral)
+# y_integral = np.linspace(0, y_max, n_integral)
 y_integral = np.concatenate((np.linspace(0, y_max*0.4, int(n_integral/2)), np.linspace(y_max*0.6, y_max, int(n_integral/2))))
 integral_points = np.stack((x_integral, y_integral), axis=1)
 
 def integral_stress(inputs, outputs, X):
-    x_inputs = jnp.meshgrid(inputs[:, 0], inputs[:, 1], indexing="ij")[0]
-    Syy = outputs[:, 3:4].reshape(x_inputs.shape)
-    return jnp.trapezoid(Syy, x_inputs, axis=0)
+    x_grid = [x_.reshape(-1) for x_ in jnp.meshgrid(inputs[:, 0], inputs[:, 1], indexing="ij")]
+    x_grid = stack(x_grid, axis=-1)
+    x_mesh = jax.vmap(coordMap)(x_grid)[:,0].reshape((inputs.shape[0], inputs.shape[0]))
+
+    Syy = outputs[:, 3:4].reshape(x_mesh.shape)
+    return jnp.trapezoid(Syy, x_mesh, axis=0)
 
 Integral_BC = dde.PointSetOperatorBC(integral_points, pstress*x_max, integral_stress)
 
@@ -210,13 +222,13 @@ num_boundary = 0
 # if n_DIC:
 #     bcs += [measure_Ux, measure_Uy]
 
-if bc_type == "soft":
-    bcs += [
-        sxx_right_bc,
-        uy_bottom_bc,
-        ux_left_bc,
-    ]
-    num_boundary = 64 if net_type == "spinn" else 500
+# if bc_type == "soft":
+#     bcs += [
+#         sxx_right_bc,
+#         uy_bottom_bc,
+#         ux_left_bc,
+#     ]
+#     num_boundary = 64 if net_type == "spinn" else 500
 
 
 def get_num_params(net, input_shape=None):
@@ -241,7 +253,7 @@ initializer = "Glorot uniform"
 optimizer = "adam"
 h_plot = 0.02
 if net_type == "spinn":
-    layers = [2, 32, 32, 32, 32, 5]
+    layers = [2, 64, 64, 64, 128, 5]
     net = dde.nn.SPINN(layers, activation, initializer, mlp)
     num_point = 100
     total_points = num_point**2 + num_boundary**2
@@ -271,7 +283,7 @@ data = dde.data.PDE(
     bcs,
     num_domain=num_point,
     num_boundary=num_boundary,
-    # solution=solution_fn,
+    solution=solution_fn,
     num_test=num_test,
     is_SPINN=net_type == "spinn",
 )
@@ -300,6 +312,7 @@ new_folder_path = os.path.join(results_path, folder_name)
 if not os.path.exists(new_folder_path):
     os.makedirs(new_folder_path)
 
+save_model_path = os.path.join(new_folder_path, "model") if save_model else None
 
 callbacks = [dde.callbacks.Timer(available_time)] if available_time else []
 
@@ -307,11 +320,11 @@ for i, field in log_output_fields.items():
     callbacks.append(dde.callbacks.OperatorPredictor(X_plot, lambda x, output, i=i: output[0][:, i], period=log_every, filename=os.path.join(new_folder_path, f"{field}_history.dat")))
 
 model = dde.Model(data, net)
-model.compile(optimizer, lr=lr, loss_weights=loss_weights)
+model.compile(optimizer, lr=lr, metrics=["l2 relative error"], loss_weights=loss_weights)
 
 start_time = time.time()
 losshistory, train_state = model.train(
-    iterations=n_iter, callbacks=callbacks, display_every=log_every
+    iterations=n_iter, callbacks=callbacks, display_every=log_every#, model_save_path=save_model_path
 )
 elapsed = time.time() - start_time
 
@@ -350,7 +363,8 @@ def log_config(fname):
         "logged_fields": log_output_fields,
         "n_DIC": n_DIC,
         "lr": lr,
-
+        "u_0": u_0,
+        "loss_weights": loss_weights,
     }
 
     info = {**system_info, **gpu_info, **execution_info}
