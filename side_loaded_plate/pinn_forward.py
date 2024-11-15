@@ -42,7 +42,7 @@ noise_ratio = args.noise_ratio
 lr = args.lr
 u_0 = args.u_0
 loss_weights = args.loss_weights
-is_forward = args.is_forward
+is_forward = True #args.is_forward
 
 if net_type == "spinn":
     dde.config.set_default_autodiff("forward")
@@ -95,8 +95,10 @@ sxx_right_bc = dde.icbc.DirichletBC(geom, lambda x: side_load(x[:, 1]), boundary
 
 
 def HardBC(x, f, x_max=x_max):
-    if net_type == "spinn" and x.shape[0] != f.shape[0]:
-        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
+    if net_type == "spinn" and isinstance(x, list):
+        """For SPINN, the input x is a list of 1D arrays (X_coords, Y_coords)
+        that need to be converted to a 2D meshgrid of same shape as the output f"""
+        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(x[0].squeeze(), x[1].squeeze(), indexing="ij")]
         x = stack(x_mesh, axis=-1)
 
     Ux = f[:, 0] * x[:, 0]*u_0 
@@ -130,7 +132,9 @@ for i in range(solution_val.shape[1]):
 
 def solution_fn(x):
     if net_type == "spinn":
-        x_mesh = [x_.reshape(-1) for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
+        """For SPINN, the input x is a list of 1D arrays (X_coords, Y_coords)
+        that need to be converted to a 2D meshgrid of same shape as the ouput"""
+        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(x[0].squeeze(), x[1].squeeze(), indexing="ij")]
         x = stack(x_mesh, axis=-1)
 
     return np.array([interp((x[:,0], x[:,1])) for interp in interpolators]).T
@@ -138,21 +142,17 @@ def solution_fn(x):
 
 def jacobian(f, x, i, j):
     if dde.backend.backend_name == "jax":
-        return dde.grad.jacobian(f, x, i=i, j=j)[
-            0
-        ]  # second element is the function used by jax to compute the gradients
+        return dde.grad.jacobian(f, x, i=i, j=j)[0]  # second element is the function used by jax to compute the gradients
     else:
         return dde.grad.jacobian(f, x, i=i, j=j)
 
 
 def pde(x, f):
-    # x_mesh = jnp.meshgrid(x[:,0].ravel(), x[:,0].ravel(), indexing='ij')
     if net_type == "spinn":
-        x_mesh = [x_.reshape(-1) for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
+        """For SPINN, the input x is a list of 1D arrays (X_coords, Y_coords)
+        that need to be converted to a 2D meshgrid of same shape as the output f"""
+        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(x[0].squeeze(), x[1].squeeze(), indexing="ij")]
         x = stack(x_mesh, axis=-1)
-
-    # f[0][:, 0:2] = f[0][:, 0:2] * u_0
-    # f[1][0:2] = f[1][0:2] * u_0
 
     E_xx = jacobian(f, x, i=0, j=0) 
     E_yy = jacobian(f, x, i=1, j=1)
