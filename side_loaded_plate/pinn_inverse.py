@@ -14,19 +14,20 @@ import argparse
 
 parser = argparse.ArgumentParser(description='Physics Informed Neural Networks for Linear Elastic Plate')
 
-parser.add_argument('--n_iter', type=int, default=2000000, help='Number of iterations')
-parser.add_argument('--log_every', type=int, default=3000, help='Log every n steps')
-parser.add_argument('--available_time', type=int, default=120, help='Available time in minutes')
+parser.add_argument('--n_iter', type=int, default=int(1e10), help='Number of iterations')
+parser.add_argument('--log_every', type=int, default=1000, help='Log every n steps')
+parser.add_argument('--available_time', type=int, default=5, help='Available time in minutes')
 parser.add_argument('--log_output_fields', nargs='+', default=['Ux', 'Uy', 'Sxx', 'Syy', 'Sxy'], help='Fields to log')
 parser.add_argument('--net_type', choices=['spinn', 'pfnn'], default='spinn', help='Type of network')
 parser.add_argument('--bc_type', choices=['hard', 'soft'], default='hard', help='Type of boundary condition')
 parser.add_argument('--mlp', choices=['mlp', 'modified_mlp'], default='mlp', help='Type of MLP for SPINN')
-parser.add_argument('--n_DIC', type=int, default=6, help='Number of DIC')
-parser.add_argument('--noise_ratio', type=float, default=0, help='Noise ratio')
+parser.add_argument('--n_DIC', type=int, default=6, help='Number of DIC') # n_DIC**2 points
+parser.add_argument('--noise_ratio', type=float, default=0.1, help='Noise ratio')
 parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
 parser.add_argument('--u_0', type=float, default=1e-4, help='Displacement scaling factor')
-parser.add_argument('--loss_weights', nargs='+', type=float, default=[1,1,1,1,1,1e6,2e6], help='Loss weights (more on DIC points)')
-
+parser.add_argument('--loss_weights', nargs='+', type=float, default=[1,1,1,1,1,1e8,1e8], help='Loss weights (more on DIC points)')
+parser.add_argument('--lame_params', action='store_true', default=False, help='Use Lame parameters instead of E and nu')
+parser.add_argument('--params_iter_speed', nargs='+', type=float, default=[1,1], help='Scale iteration step for each parameter')
 args = parser.parse_args()
 
 n_iter = args.n_iter
@@ -41,11 +42,11 @@ noise_ratio = args.noise_ratio
 lr = args.lr
 u_0 = args.u_0
 loss_weights = args.loss_weights
+lame_params = args.lame_params
+params_iter_speed = args.params_iter_speed
 
 if net_type == "spinn":
     dde.config.set_default_autodiff("forward")
-
-lame_params = False
 
 L_max = 3.0
 E_actual = 210e3  # Young's modulus
@@ -60,9 +61,7 @@ nu_init = 0.2  # Initial guess for Poisson's ratio
 lmbd_init = E_init * nu_init / ((1 + nu_init) * (1 - 2 * nu_init))  # Lame's first parameter
 mu_init = E_init / (2 * (1 + nu_init))  # Lame's second parameter
 
-params_factor = []
-params_factor.append(dde.Variable(1.0, update_factor=10.0)) 
-params_factor.append(dde.Variable(1.0, update_factor=2.0))
+params_factor = [dde.Variable(1/scale) for scale in params_iter_speed]
 trainable_variables = params_factor
 
 # Load
@@ -101,8 +100,10 @@ sxx_right_bc = dde.icbc.DirichletBC(geom, lambda x: side_load(x[:, 1]), boundary
 
 
 def HardBC(x, f, x_max=L_max):
-    if net_type == "spinn" and x.shape[0] != f.shape[0]:
-        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
+    if net_type == "spinn" and isinstance(x, list):
+        """For SPINN, the input x is a list of 1D arrays (X_coords, Y_coords)
+        that need to be converted to a 2D meshgrid of same shape as the output f"""
+        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(x[0].squeeze(), x[1].squeeze(), indexing="ij")]
         x = stack(x_mesh, axis=-1)
 
     Ux = f[:, 0] * x[:, 0]*u_0 
@@ -136,7 +137,9 @@ for i in range(solution_val.shape[1]):
 
 def solution_fn(x):
     if net_type == "spinn":
-        x_mesh = [x_.reshape(-1) for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
+        """For SPINN, the input x is a list of 1D arrays (X_coords, Y_coords)
+        that need to be converted to a 2D meshgrid of same shape as the ouput"""
+        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(x[0].squeeze(), x[1].squeeze(), indexing="ij")]
         x = stack(x_mesh, axis=-1)
 
     return np.array([interp((x[:,0], x[:,1])) for interp in interpolators]).T
@@ -152,12 +155,13 @@ def jacobian(f, x, i, j):
 
 
 def pde(x, f, unknowns=params_factor):
-    # x_mesh = jnp.meshgrid(x[:,0].ravel(), x[:,0].ravel(), indexing='ij')
     if net_type == "spinn":
-        x_mesh = [x_.reshape(-1) for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
+        """For SPINN, the input x is a list of 1D arrays (X_coords, Y_coords)
+        that need to be converted to a 2D meshgrid of same shape as the output f"""
+        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(x[0].squeeze(), x[1].squeeze(), indexing="ij")]
         x = stack(x_mesh, axis=-1)
 
-    param_factors = unknowns
+    param_factors = [unknown*scale for unknown, scale in zip(unknowns, params_iter_speed)]
     if lame_params:
         lmbd, mu = lmbd_init*param_factors[0], mu_init*param_factors[1]
     else:
@@ -190,9 +194,8 @@ def pde(x, f, unknowns=params_factor):
 
     return [momentum_x, momentum_y, stress_x, stress_y, stress_xy]
 
-# X_DIC = geom.uniform_points(1000, boundary=False)
-X_DIC_input = np.stack([np.linspace(0, L_max, n_DIC)] * 2, axis=1)
-X_DIC_mesh = [x_.ravel() for x_ in np.meshgrid(X_DIC_input[:,0],X_DIC_input[:,1],indexing="ij")]
+X_DIC_input = [np.linspace(0, L_max, n_DIC).reshape(-1, 1)]*2
+X_DIC_mesh = [x_.ravel() for x_ in np.meshgrid(X_DIC_input[0].squeeze(),X_DIC_input[1].squeeze(),indexing="ij")]
 X_DIC_plot = np.stack(X_DIC_mesh, axis=1)
 if net_type != "spinn":
     X_DIC_input = X_DIC_plot
@@ -232,7 +235,7 @@ def get_num_params(net, input_shape=None):
 
         rng = jax.random.PRNGKey(0)
         return sum(
-            p.size for p in jax.tree_leaves(net.init(rng, jnp.ones(input_shape)))
+            p.size for p in jax.tree.leaves(net.init(rng, jnp.ones(input_shape)))
         )
 
 
@@ -245,7 +248,7 @@ if net_type == "spinn":
     num_point = 100
     total_points = num_point**2 + num_boundary**2
     num_params = get_num_params(net, input_shape=layers[0])
-    X_plot = np.stack([np.linspace(0, L_max, 100)] * 2, axis=1)
+    X_plot = [np.linspace(0, L_max, 100).reshape(-1,1)] * 2
 
 else:
     layers = [2, [40] * 5, [40] * 5, [40] * 5, [40] * 5, 5]
@@ -277,7 +280,8 @@ if bc_type == "hard":
     net.apply_output_transform(HardBC)
 
 
-results_path = [r"./inverse",r"/mnt/d/phd/SPIQ/loaded_plate/inverse"][1]
+dir_path = os.path.dirname(os.path.realpath(__file__))
+results_path = os.path.join(dir_path, "results_inverse")
 folder_name = f"{net_type}_E-{E_init}_nu-{nu_init}_nDIC-{n_DIC**2}_noise-{noise_ratio}_{available_time if available_time else n_iter}{'min' if available_time else 'iter'}"
 
 # Check if any folders with the same name exist
@@ -309,17 +313,17 @@ model.compile(optimizer, lr=lr, metrics=["l2 relative error"], loss_weights=loss
 
 start_time = time.time()
 if lame_params:
-    print(f"lmbd: {lmbd_init*params_factor[0].value:.3f}| {lmbd_actual:.3f}, mu: {mu_init*params_factor[1].value:.3f}| {mu_actual:.3f}")
+    print(f"lmbd: {lmbd_init*params_factor[0].value*params_iter_speed[0]:.3f}| {lmbd_actual:.3f}, mu: {mu_init*params_factor[1].value*params_iter_speed[1]:.3f}| {mu_actual:.3f}")
 else:
-    print(f"E: {E_init*params_factor[0].value:.3f}, nu: {nu_init*params_factor[1].value:.3f}")
+    print(f"E: {E_init*params_factor[0].value*params_iter_speed[0]:.3f}, nu: {nu_init*params_factor[1].value*params_iter_speed[1]:.3f}")
 
 losshistory, train_state = model.train(
     iterations=n_iter, callbacks=callbacks, display_every=log_every
 )
 if lame_params:
-    print(f"lmbd: {lmbd_init*params_factor[0].value:.3f}| {lmbd_actual:.3f}, mu: {mu_init*params_factor[1].value:.3f}| {mu_actual:.3f}")
+    print(f"lmbd: {lmbd_init*params_factor[0].value*params_iter_speed[0]:.3f}| {lmbd_actual:.3f}, mu: {mu_init*params_factor[1].value*params_iter_speed[1]:.3f}| {mu_actual:.3f}")
 else:
-    print(f"E: {E_init*params_factor[0].value:.3f}, nu: {nu_init*params_factor[1].value:.3f}")
+    print(f"E: {E_init*params_factor[0].value*params_iter_speed[0]:.3f}, nu: {nu_init*params_factor[1].value*params_iter_speed[1]:.3f}")
 
 elapsed = time.time() - start_time
 
@@ -363,6 +367,8 @@ def log_config(fname):
         "E_init": E_init,
         "nu_init": nu_init,
         "lame_params": lame_params,
+        "params_iter_speed": params_iter_speed,
+        "loss_weights": loss_weights,
         "L_max": L_max,
 
     }
@@ -378,3 +384,13 @@ log_config(os.path.join(new_folder_path, "config.json"))
 dde.utils.save_loss_history(
     losshistory, os.path.join(new_folder_path, "loss_history.dat")
 )
+
+#correct saved variable values with the training factor
+params_init = [lmbd_init, mu_init] if lame_params else [E_init, nu_init]
+with open(os.path.join(new_folder_path, "variables_history.dat"), "r") as f:
+    lines = f.readlines()
+with open(os.path.join(new_folder_path, "variables_history.dat"), "w") as f:
+    for line in lines:
+        step, value = line.strip().split(' ', 1)
+        values = [scale_i*iter_speed_i*value_i for scale_i, iter_speed_i, value_i in zip(params_iter_speed, params_init, eval(value))]
+        f.write(f"{step} "+dde.utils.list_to_str(values, precision=3)+"\n")
