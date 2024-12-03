@@ -18,7 +18,7 @@ parser = argparse.ArgumentParser(description='Physics Informed Neural Networks f
 
 parser.add_argument('--n_iter', type=int, default=10, help='Number of iterations')
 parser.add_argument('--log_every', type=int, default=2500, help='Log every n steps')
-parser.add_argument('--available_time', type=int, default=60, help='Available time in minutes')
+parser.add_argument('--available_time', type=int, default=2, help='Available time in minutes')
 parser.add_argument('--log_output_fields', nargs='+', default=['Ux', 'Uy', 'Sxx', 'Syy', 'Sxy'], help='Fields to log')
 parser.add_argument('--net_type', choices=['spinn', 'pfnn'], default='spinn', help='Type of network')
 parser.add_argument('--bc_type', choices=['hard', 'soft'], default='hard', help='Type of boundary condition')
@@ -122,27 +122,22 @@ def solution_fn(x):
 geom = dde.geometry.Rectangle([0, 0], [x_max, y_max])
 
 def HardBC(x, f):
-    if net_type == "spinn" and x.shape[0] != f.shape[0]:
-        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
+    if net_type == "spinn" and isinstance(x, list):
+        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(
+            jnp.atleast_1d(x[0].squeeze()), 
+            jnp.atleast_1d(x[1].squeeze()), 
+            indexing="ij"
+        )]
         x = stack(x_mesh, axis=-1)
+    x_mapped = jax.vmap(coordMap)(x)
+    Ux = f[:, 0] * x_mapped[:, 1]*(y_max - x_mapped[:, 1])*u_0 
+    Uy = f[:, 1] * x_mapped[:, 1]*u_0
 
-    Ux = f[:, 0] * x[:, 1]*(y_max - x[:, 1])*u_0 
-    Uy = f[:, 1] * x[:, 1]*u_0
+    Sxx = f[:, 2] * (x_max - x_mapped[:, 0])*x_mapped[:, 0]
+    Syy = f[:, 3] * (y_max - x_mapped[:, 1]) + pstress
+    Sxy = f[:, 4] * x_mapped[:, 0]*(x_max - x_mapped[:, 0])
 
-    U_mapped = jax.vmap(tensMap)(stack((Ux, Uy), axis=1), x)
-
-
-    Sxx = f[:, 2] * (x_max - x[:, 0])*x[:, 0]
-    Syy = f[:, 3] #* (y_max - x[:, 1]) + pstress
-    Sxy = f[:, 4] * x[:, 0]*(x_max - x[:, 0])
-
-    S = jnp.stack((Sxx, Sxy, Sxy, Syy), axis=1).reshape(-1, 2, 2)
-    S_mapped = jax.vmap(tensMap)(S, x)
-
-    Syy_mapped = S_mapped[:,1,1] * (y_max - x[:, 1]) + pstress
-
-    S_mapped = jnp.stack((S_mapped[:,0,0],Syy_mapped,(S_mapped[:,0,1]+S_mapped[:,1,0])/2), axis=1)
-    return jnp.concatenate((U_mapped, S_mapped), axis=1)
+    return stack((Ux, Uy, Sxx, Syy, Sxy), axis=1)
     # return stack((Ux, Uy, Sxx, Syy, Sxy), axis=1)
 
 
@@ -155,8 +150,12 @@ def jacobian(f, x, i, j):
 
 def pde(x, f):
     # x_mesh = jnp.meshgrid(x[:,0].ravel(), x[:,0].ravel(), indexing='ij')
-    if net_type == "spinn":
-        x_mesh = [x_.reshape(-1) for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
+    if net_type == "spinn" and isinstance(x, list):
+        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(
+            jnp.atleast_1d(x[0].squeeze()), 
+            jnp.atleast_1d(x[1].squeeze()), 
+            indexing="ij"
+        )]
         x = stack(x_mesh, axis=-1)
     x = jax.vmap(coordMap)(x)
 
@@ -229,7 +228,6 @@ num_boundary = 0
 #         ux_left_bc,
 #     ]
 #     num_boundary = 64 if net_type == "spinn" else 500
-
 
 def get_num_params(net, input_shape=None):
     if dde.backend.backend_name == "pytorch":
