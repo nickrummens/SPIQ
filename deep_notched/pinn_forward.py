@@ -114,8 +114,13 @@ for i in range(solution_val.shape[1]):
     interpolators.append(interp)
 
 def solution_fn(x):
-    x_mesh = [x_.reshape(-1) for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
-    x = stack(x_mesh, axis=-1)
+    if net_type == "spinn" and isinstance(x, list):
+        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(
+            jnp.atleast_1d(x[0].squeeze()), 
+            jnp.atleast_1d(x[1].squeeze()), 
+            indexing="ij"
+        )]
+        x = stack(x_mesh, axis=-1)
     # x = jax.vmap(coordMap)(x)
     return np.array([interp((x[:,0], x[:,1])) for interp in interpolators]).T
 
@@ -203,14 +208,17 @@ n_integral = 100
 x_integral = np.linspace(0, x_max, n_integral)
 # y_integral = np.linspace(0, y_max, n_integral)
 y_integral = np.concatenate((np.linspace(0, y_max*0.4, int(n_integral/2)), np.linspace(y_max*0.6, y_max, int(n_integral/2))))
-integral_points = np.stack((x_integral, y_integral), axis=1)
+integral_points = [x_integral.reshape(-1,1), y_integral.reshape(-1,1)]
 
 def integral_stress(inputs, outputs, X):
-    x_grid = [x_.reshape(-1) for x_ in jnp.meshgrid(inputs[:, 0], inputs[:, 1], indexing="ij")]
+    x_grid = [x_.ravel() for x_ in jnp.meshgrid(
+            jnp.atleast_1d(inputs[0].squeeze()), 
+            jnp.atleast_1d(inputs[1].squeeze()), 
+            indexing="ij")]
     x_grid = stack(x_grid, axis=-1)
-    x_mesh = jax.vmap(coordMap)(x_grid)[:,0].reshape((inputs.shape[0], inputs.shape[0]))
+    x_mesh = jax.vmap(coordMap)(x_grid)[:,0].reshape((len(inputs[0]), len(inputs[0])))
 
-    Syy = outputs[:, 3:4].reshape(x_mesh.shape)
+    Syy = outputs[0][:, 3:4].reshape(x_mesh.shape)
     return jnp.trapezoid(Syy, x_mesh, axis=0)
 
 Integral_BC = dde.PointSetOperatorBC(integral_points, pstress*x_max, integral_stress)
@@ -256,9 +264,9 @@ if net_type == "spinn":
     num_point = 100
     total_points = num_point**2 + num_boundary**2
     num_params = get_num_params(net, input_shape=layers[0])
-    x_plot = np.linspace(0,x_max,100)
-    y_plot = np.linspace(0,y_max,100)
-    X_plot = np.stack((x_plot, y_plot), axis=1)
+    x_plot = np.linspace(0,x_max,100).reshape(-1,1)
+    y_plot = np.linspace(0,y_max,100).reshape(-1,1)
+    X_plot = [x_plot, y_plot]
 
 else:
     layers = [2, [40] * 5, [40] * 5, [40] * 5, [40] * 5, 5]
@@ -271,7 +279,7 @@ else:
         np.linspace(0, y_max, int(y_max/h_plot)),
         indexing="ij",
     )
-    X_plot = np.stack((X_mesh[0].ravel(), X_mesh[1].ravel()), axis=1)
+    X_plot = [X_mesh[0].reshape(-1,1), X_mesh[1].reshape(-1,1)]
 
 num_test = 100
 
@@ -290,7 +298,7 @@ if bc_type == "hard":
     net.apply_output_transform(HardBC)
 
 
-results_path = [r"./forward",r"/mnt/d/phd/SPIQ/deep_notched/forward"][1]
+results_path = [r"./deep_notched/forward",r"/mnt/d/phd/SPIQ/deep_notched/forward"][0]
 folder_name = f"{net_type}_{available_time if available_time else n_iter}{'min' if available_time else 'iter'}"
 
 # Check if any folders with the same name exist
