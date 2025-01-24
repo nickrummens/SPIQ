@@ -49,8 +49,34 @@ save_model = args.save_model
 if net_type == "spinn":
     dde.config.set_default_autodiff("forward")
 
-x_max = 48.0
-y_max = 100.0
+#variables ROI
+x_max_ROI = 20
+y_max_ROI = 80
+
+#variables FEM
+R = 20
+Hmax = 220.0
+n_mesh = 2 #lc
+theta = np.arcsin(10/R)
+b = 20
+indent_x = R - (R * np.cos(theta))
+indent_y = R * np.sin(theta)
+Lmax = 2*indent_x + b
+L_c = 120
+L_u = 80
+H_clamp = 40
+total_points_vert = 2*H_clamp + 2*R + L_c #see geometry mapping code
+total_points_hor = 100
+
+x_max_FEM = (2*indent_x) + b
+y_max_FEM = 2*H_clamp + 2*R + L_c
+
+#ROI positioning
+offs_x = indent_x
+offs_y = indent_y + H_clamp
+
+
+
 E = 210e3  # Young's modulus
 nu = 0.3  # Poisson's ratio
 
@@ -69,10 +95,10 @@ stack = dde.backend.stack
 
 
 # Load geometry mapping
-nx=100
-ny=116
+nx= x_max_ROI
+ny= y_max_ROI
 dir_path = os.path.dirname(os.path.realpath(__file__))
-Xp = np.loadtxt(os.path.join(dir_path, "s_shape_geomapping.txt"))
+Xp = np.loadtxt(os.path.join(dir_path, "dogbone_ROI.txt"))
 
 
 # Interpolate mapping
@@ -93,11 +119,11 @@ def tensMap(tens, x):
     return J @ tens
 
 # Load solution
-n_mesh_x = 100
-n_mesh_y = 116
+n_mesh_x = total_points_hor
+n_mesh_y = total_points_vert
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
-data = np.loadtxt(os.path.join(dir_path, "fem_solution_s_shape.dat"))
+data = np.loadtxt(os.path.join(dir_path, "fem_solution_dogbone.dat"))
 X_val = data[:, :2]
 u_val = data[:, 2:4]
 stress_val = data[:, 7:10]
@@ -105,6 +131,9 @@ stress_val = data[:, 7:10]
 solution_val = np.hstack((u_val, stress_val))
 
 # Interpolate solution
+y_max = y_max_FEM
+x_max = x_max_FEM
+
 x_grid = np.linspace(0, x_max, n_mesh_x)
 y_grid = np.linspace(0, y_max, n_mesh_y)
 
@@ -124,7 +153,11 @@ def solution_fn(x):
     # x = jax.vmap(coordMap)(x)
     return np.array([interp((x[:,0], x[:,1])) for interp in interpolators]).T
 
-geom = dde.geometry.Rectangle([0, 0], [x_max, y_max])
+
+
+geom = dde.geometry.Rectangle([0, 0], [x_max_ROI, y_max_ROI])
+
+
 
 def HardBC(x, f):
     if net_type == "spinn" and isinstance(x, list):
@@ -135,19 +168,19 @@ def HardBC(x, f):
         )]
         x = stack(x_mesh, axis=-1)
 
-    Ux = f[:, 0] * x[:, 1]*(y_max - x[:, 1])*u_0 
-    Uy = f[:, 1] * x[:, 1]*u_0
+    Ux = f[:, 0] * (x[:, 1]) *(y_max_ROI - x[:, 1])*u_0 
+    Uy = f[:, 1] * (x[:, 1])*u_0
 
     U_mapped = jax.vmap(tensMap)(stack((Ux, Uy), axis=1), x)
 
-    Sxx = f[:, 2] * (x_max - x[:, 0])*x[:, 0]
+    Sxx = f[:, 2] * (x_max_ROI - x[:, 0])* (x[:, 0])
     Syy = f[:, 3] #* (y_max - x[:, 1]) + pstress
-    Sxy = f[:, 4] * x[:, 0]*(x_max - x[:, 0])
+    Sxy = f[:, 4] * (x_max_ROI - x[:, 0])* (x[:, 0])
 
     S = jnp.stack((Sxx, Sxy, Sxy, Syy), axis=1).reshape(-1, 2, 2)
     S_mapped = jax.vmap(tensMap)(S, x)
 
-    Syy_mapped = S_mapped[:,1,1] * (y_max - x[:, 1]) + pstress
+    Syy_mapped = S_mapped[:,1,1] * (y_max_ROI - x[:, 1]) + pstress
 
     S_mapped = jnp.stack((S_mapped[:,0,0],Syy_mapped,(S_mapped[:,0,1]+S_mapped[:,1,0])/2), axis=1)
     return jnp.concatenate((U_mapped, S_mapped), axis=1)
@@ -198,7 +231,7 @@ def pde(x, f):
     return [momentum_x, momentum_y, stress_x, stress_y, stress_xy]
 
 X_DIC = geom.uniform_points(1000, boundary=False)
-X_DIC_input = np.stack([np.linspace(0, x_max, n_DIC)] * 2, axis=1)
+X_DIC_input = np.stack([np.linspace(offs_x, offs_x + x_max_ROI, n_DIC)] * 2, axis=1)
 X_DIC_mesh = [x_.ravel() for x_ in np.meshgrid(X_DIC_input[:,0],X_DIC_input[:,1],indexing="ij")]
 X_DIC_plot = np.stack(X_DIC_mesh, axis=1)
 if net_type != "spinn":
@@ -213,9 +246,9 @@ measure_Uy = dde.PointSetBC(X_DIC_input, U_DIC[:, 1:2], component=1)
 
 # Integral stress BC
 n_integral = 100
-x_integral = np.linspace(0, x_max, n_integral)
+x_integral = np.linspace(0, x_max_ROI, n_integral)
 # y_integral = np.linspace(0, y_max, n_integral)
-y_integral = np.linspace(0, y_max, n_integral)#np.concatenate((np.linspace(0, y_max*0.4, int(n_integral/2)), np.linspace(y_max*0.6, y_max, int(n_integral/2))))
+y_integral = np.linspace(0, y_max_ROI, n_integral)#np.concatenate((np.linspace(0, y_max*0.4, int(n_integral/2)), np.linspace(y_max*0.6, y_max, int(n_integral/2))))
 integral_points = [x_integral.reshape(-1,1), y_integral.reshape(-1,1)]
 
 def integral_stress(inputs, outputs, X):
@@ -272,8 +305,8 @@ if net_type == "spinn":
     num_point = 100
     total_points = num_point**2 + num_boundary**2
     num_params = get_num_params(net, input_shape=layers[0])
-    x_plot = np.linspace(0,x_max,100).reshape(-1,1)
-    y_plot = np.linspace(0,y_max,100).reshape(-1,1)
+    x_plot = np.linspace(0,x_max_ROI,100).reshape(-1,1)
+    y_plot = np.linspace(0,y_max_ROI,100).reshape(-1,1)
     X_plot = [x_plot, y_plot]
 
 else:
@@ -283,8 +316,8 @@ else:
     total_points = num_point + num_boundary
     num_params = get_num_params(net, input_shape=layers[0])
     X_mesh = np.meshgrid(
-        np.linspace(0, x_max, int(x_max/h_plot)),
-        np.linspace(0, y_max, int(y_max/h_plot)),
+        np.linspace(0, x_max_ROI, int(x_max_ROI/h_plot)),
+        np.linspace(0, y_max_ROI, int(y_max_ROI/h_plot)),
         indexing="ij",
     )
     X_plot = np.stack((X_mesh[0].ravel(), X_mesh[1].ravel()), axis=1)
@@ -306,7 +339,7 @@ if bc_type == "hard":
     net.apply_output_transform(HardBC)
 
 
-results_path = r"./S_shape/results"
+results_path = r"./dogbone/results"
 folder_name = f"{net_type}_{available_time if available_time else n_iter}{'min' if available_time else 'iter'}"
 
 # Check if any folders with the same name exist
