@@ -1,0 +1,39 @@
+{
+    "OS": "Linux",
+    "Release": "5.15.167.4-microsoft-standard-WSL2",
+    "Version": "#1 SMP Tue Nov 5 00:21:55 UTC 2024",
+    "Machine": "x86_64",
+    "Processor": "x86_64",
+    "CPU count": 32,
+    "RAM": 31.16778564453125,
+    "n_iter": 65704,
+    "elapsed": 125.91941142082214,
+    "iter_per_sec": 521.7940527089784,
+    "backend": "jax",
+    "batch_size": 10000,
+    "num_params": 100096,
+    "activation": "tanh",
+    "initializer": "Glorot uniform",
+    "optimizer": "adam",
+    "net_type": "spinn",
+    "mlp": "mlp",
+    "bc_type": "hard",
+    "logged_fields": {
+        "0": "Ux",
+        "1": "Uy",
+        "2": "Sxx",
+        "3": "Syy",
+        "4": "Sxy"
+    },
+    "n_DIC": 6,
+    "lr": 0.001,
+    "u_0": 1e-05,
+    "loss_weights": [
+        1,
+        1,
+        100.0,
+        100.0,
+        100.0,
+        1
+    ]
+}

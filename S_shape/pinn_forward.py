@@ -16,9 +16,9 @@ import jax.numpy as jnp
 
 parser = argparse.ArgumentParser(description='Physics Informed Neural Networks for Linear Elastic Plate')
 
-parser.add_argument('--n_iter', type=int, default=10, help='Number of iterations')
+parser.add_argument('--n_iter', type=int, default=100000, help='Number of iterations')
 parser.add_argument('--log_every', type=int, default=2500, help='Log every n steps')
-parser.add_argument('--available_time', type=int, default=60, help='Available time in minutes')
+parser.add_argument('--available_time', type=int, default=2, help='Available time in minutes')
 parser.add_argument('--log_output_fields', nargs='+', default=['Ux', 'Uy', 'Sxx', 'Syy', 'Sxy'], help='Fields to log')
 parser.add_argument('--net_type', choices=['spinn', 'pfnn'], default='spinn', help='Type of network')
 parser.add_argument('--bc_type', choices=['hard', 'soft'], default='hard', help='Type of boundary condition')
@@ -114,16 +114,25 @@ for i in range(solution_val.shape[1]):
     interpolators.append(interp)
 
 def solution_fn(x):
-    x_mesh = [x_.reshape(-1) for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
-    x = stack(x_mesh, axis=-1)
+    if net_type == "spinn" and isinstance(x, list):
+        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(
+            jnp.atleast_1d(x[0].squeeze()), 
+            jnp.atleast_1d(x[1].squeeze()), 
+            indexing="ij"
+        )]
+        x = stack(x_mesh, axis=-1)
     # x = jax.vmap(coordMap)(x)
     return np.array([interp((x[:,0], x[:,1])) for interp in interpolators]).T
 
 geom = dde.geometry.Rectangle([0, 0], [x_max, y_max])
 
 def HardBC(x, f):
-    if net_type == "spinn" and x.shape[0] != f.shape[0]:
-        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
+    if net_type == "spinn" and isinstance(x, list):
+        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(
+            jnp.atleast_1d(x[0].squeeze()), 
+            jnp.atleast_1d(x[1].squeeze()), 
+            indexing="ij"
+        )]
         x = stack(x_mesh, axis=-1)
 
     Ux = f[:, 0] * x[:, 1]*(y_max - x[:, 1])*u_0 
@@ -154,8 +163,12 @@ def jacobian(f, x, i, j):
 
 def pde(x, f):
     # x_mesh = jnp.meshgrid(x[:,0].ravel(), x[:,0].ravel(), indexing='ij')
-    if net_type == "spinn":
-        x_mesh = [x_.reshape(-1) for x_ in jnp.meshgrid(x[:, 0], x[:, 1], indexing="ij")]
+    if net_type == "spinn" and isinstance(x, list):
+        x_mesh = [x_.ravel() for x_ in jnp.meshgrid(
+            jnp.atleast_1d(x[0].squeeze()), 
+            jnp.atleast_1d(x[1].squeeze()), 
+            indexing="ij"
+        )]
         x = stack(x_mesh, axis=-1)
     x = jax.vmap(coordMap)(x)
 
@@ -184,33 +197,36 @@ def pde(x, f):
 
     return [momentum_x, momentum_y, stress_x, stress_y, stress_xy]
 
-# X_DIC = geom.uniform_points(1000, boundary=False)
-# X_DIC_input = np.stack([np.linspace(0, x_max, n_DIC)] * 2, axis=1)
-# X_DIC_mesh = [x_.ravel() for x_ in np.meshgrid(X_DIC_input[:,0],X_DIC_input[:,1],indexing="ij")]
-# X_DIC_plot = np.stack(X_DIC_mesh, axis=1)
-# if net_type != "spinn":
-#     X_DIC_input = X_DIC_plot
+X_DIC = geom.uniform_points(1000, boundary=False)
+X_DIC_input = np.stack([np.linspace(0, x_max, n_DIC)] * 2, axis=1)
+X_DIC_mesh = [x_.ravel() for x_ in np.meshgrid(X_DIC_input[:,0],X_DIC_input[:,1],indexing="ij")]
+X_DIC_plot = np.stack(X_DIC_mesh, axis=1)
+if net_type != "spinn":
+    X_DIC_input = X_DIC_plot
 
-# U_DIC = solution_fn(X_DIC_input)[:,:2]
-# noise_floor = noise_ratio * np.std(U_DIC)
-# U_DIC += np.random.normal(0, noise_floor, U_DIC.shape)
+U_DIC = solution_fn(X_DIC_input)[:,:2]
+noise_floor = noise_ratio * np.std(U_DIC)
+U_DIC += np.random.normal(0, noise_floor, U_DIC.shape)
 
-# measure_Ux = dde.PointSetBC(X_DIC_input, U_DIC[:, 0:1], component=0)
-# measure_Uy = dde.PointSetBC(X_DIC_input, U_DIC[:, 1:2], component=1)
+measure_Ux = dde.PointSetBC(X_DIC_input, U_DIC[:, 0:1], component=0)
+measure_Uy = dde.PointSetBC(X_DIC_input, U_DIC[:, 1:2], component=1)
 
 # Integral stress BC
 n_integral = 100
 x_integral = np.linspace(0, x_max, n_integral)
 # y_integral = np.linspace(0, y_max, n_integral)
-y_integral = np.concatenate((np.linspace(0, y_max*0.4, int(n_integral/2)), np.linspace(y_max*0.6, y_max, int(n_integral/2))))
-integral_points = np.stack((x_integral, y_integral), axis=1)
+y_integral = np.linspace(0, y_max, n_integral)#np.concatenate((np.linspace(0, y_max*0.4, int(n_integral/2)), np.linspace(y_max*0.6, y_max, int(n_integral/2))))
+integral_points = [x_integral.reshape(-1,1), y_integral.reshape(-1,1)]
 
 def integral_stress(inputs, outputs, X):
-    x_grid = [x_.reshape(-1) for x_ in jnp.meshgrid(inputs[:, 0], inputs[:, 1], indexing="ij")]
+    x_grid = [x_.ravel() for x_ in jnp.meshgrid(
+            jnp.atleast_1d(inputs[0].squeeze()), 
+            jnp.atleast_1d(inputs[1].squeeze()), 
+            indexing="ij")]
     x_grid = stack(x_grid, axis=-1)
-    x_mesh = jax.vmap(coordMap)(x_grid)[:,0].reshape((inputs.shape[0], inputs.shape[0]))
+    x_mesh = jax.vmap(coordMap)(x_grid)[:,0].reshape((len(inputs[0]), len(inputs[0])))
 
-    Syy = outputs[:, 3:4].reshape(x_mesh.shape)
+    Syy = outputs[0][:, 3:4].reshape(x_mesh.shape)
     return jnp.trapezoid(Syy, x_mesh, axis=0)
 
 Integral_BC = dde.PointSetOperatorBC(integral_points, pstress*x_max, integral_stress)
@@ -256,9 +272,9 @@ if net_type == "spinn":
     num_point = 100
     total_points = num_point**2 + num_boundary**2
     num_params = get_num_params(net, input_shape=layers[0])
-    x_plot = np.linspace(0,x_max,100)
-    y_plot = np.linspace(0,y_max,100)
-    X_plot = np.stack((x_plot, y_plot), axis=1)
+    x_plot = np.linspace(0,x_max,100).reshape(-1,1)
+    y_plot = np.linspace(0,y_max,100).reshape(-1,1)
+    X_plot = [x_plot, y_plot]
 
 else:
     layers = [2, [40] * 5, [40] * 5, [40] * 5, [40] * 5, 5]
@@ -290,7 +306,7 @@ if bc_type == "hard":
     net.apply_output_transform(HardBC)
 
 
-results_path = [r"./S_shape"]
+results_path = r"./S_shape/results"
 folder_name = f"{net_type}_{available_time if available_time else n_iter}{'min' if available_time else 'iter'}"
 
 # Check if any folders with the same name exist
